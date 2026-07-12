@@ -1,4 +1,8 @@
-import { resources, type ResourceStatus } from "@/lib/mockData";
+"use client";
+
+import { useEffect, useState } from "react";
+import { fetchResources } from "@/lib/api";
+import { resources as mockResources, type ResourceStatus } from "@/lib/mockData";
 
 const statusStyles: Record<ResourceStatus, string> = {
   Healthy: "bg-[#EAF3DE] text-[#3B6D11]",
@@ -8,6 +12,12 @@ const statusStyles: Record<ResourceStatus, string> = {
 };
 
 export default function ResourceTable() {
+  const [resources, setResources] = useState(mockResources);
+
+  useEffect(() => {
+    fetchResources().then(setResources);
+  }, []);
+
   return (
     <div className="bg-surface border border-line rounded-xl p-5 overflow-x-auto">
       <p className="text-[13px] font-semibold text-ink mb-4">Resources</p>
@@ -29,10 +39,7 @@ export default function ResourceTable() {
               <td className="py-2.5 text-[13px] text-inkSoft w-28">
                 <div className="flex items-center gap-2">
                   <div className="w-14 h-1.5 rounded-full bg-surfaceAlt overflow-hidden">
-                    <div
-                      className="h-full rounded-full bg-brandBlue"
-                      style={{ width: `${Math.min(r.cpu, 100)}%` }}
-                    />
+                    <div className="h-full rounded-full bg-brandBlue" style={{ width: `${Math.min(r.cpu, 100)}%` }} />
                   </div>
                   <span>{r.cpu}%</span>
                 </div>

@@ -1,4 +1,9 @@
-import { kpis } from "@/lib/mockData";
+"use client";
+
+import { useEffect, useState } from "react";
+import { fetchKpis } from "@/lib/api";
+import { kpis as mockKpis } from "@/lib/mockData";
+
 
 const toneStyles: Record<string, string> = {
   neutral: "text-ink",
@@ -6,7 +11,13 @@ const toneStyles: Record<string, string> = {
   teal: "text-[#0F6E56]",
 };
 
+
 export default function KpiCards() {
+  const [kpis, setKpis] = useState(mockKpis);
+
+  useEffect(() => {
+    fetchKpis().then(setKpis);
+  }, []);
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
       {kpis.map((kpi) => (

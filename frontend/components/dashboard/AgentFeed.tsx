@@ -1,4 +1,8 @@
-import { agentActivity, type AgentName } from "@/lib/mockData";
+"use client";
+
+import { useEffect, useState } from "react";
+import { fetchAgentActivity } from "@/lib/api";
+import { agentActivity as mockAgentActivity, type AgentName } from "@/lib/mockData";
 
 const agentColors: Record<AgentName, string> = {
   Monitor: "#2F6690",
@@ -9,11 +13,17 @@ const agentColors: Record<AgentName, string> = {
 };
 
 export default function AgentFeed() {
+  const [activity, setActivity] = useState(mockAgentActivity);
+
+  useEffect(() => {
+    fetchAgentActivity().then(setActivity);
+  }, []);
+
   return (
     <div className="bg-surface border border-line rounded-xl p-5">
       <p className="text-[13px] font-semibold text-ink mb-4">Agent activity</p>
       <div className="flex flex-col gap-4">
-        {agentActivity.map((entry) => (
+        {activity.map((entry) => (
           <div key={entry.id} className="flex gap-3 items-start">
             <span
               className="mt-0.5 flex-none text-[10.5px] font-mono font-semibold px-2 py-0.5 rounded-full text-white"
