@@ -24,6 +24,7 @@ class Settings(BaseSettings):
 
     # AWS — PLACEHOLDER, only needed once a real sandbox account is connected
     aws_region: str = "ap-south-1"
+    aws_profile: str = "cloudcare-bootstrap"
     aws_read_role_arn: str = ""
     aws_external_id: str = ""
 
