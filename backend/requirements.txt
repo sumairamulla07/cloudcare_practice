@@ -1,4 +1,6 @@
 boto3
+fastapi
 pydantic
 pydantic-settings
 pytest
+uvicorn[standard]

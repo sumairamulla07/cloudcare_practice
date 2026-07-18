@@ -32,13 +32,16 @@ class AWSClientFactory:
         )
 
     def _base_session(self) -> boto3.Session:
-        if self.settings.aws_profile:
-            return boto3.Session(
-                profile_name=self.settings.aws_profile,
-                region_name=self.settings.aws_region,
-            )
+        profile_name = (
+            self.settings.aws_profile.strip()
+            if self.settings.aws_profile
+            else None
+        )
 
-        return boto3.Session(region_name=self.settings.aws_region)
+        return boto3.Session(
+            profile_name=profile_name or None,
+            region_name=self.settings.aws_region,
+        )
 
     def _session_needs_refresh(self) -> bool:
         if self._assumed_session is None or self._expires_at is None:

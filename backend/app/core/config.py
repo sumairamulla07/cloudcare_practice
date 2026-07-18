@@ -13,14 +13,23 @@ class Settings(BaseSettings):
     )
 
     app_env: Literal["development", "test", "production"] = "development"
+    cors_origins: str = "http://localhost:3000"
 
-    aws_profile: str | None = "cloudcare-bootstrap"
+    aws_profile: str | None = None
     aws_region: str = "ap-south-1"
-    aws_role_arn: str
-    aws_external_id: str
+    aws_role_arn: str = ""
+    aws_external_id: str = ""
 
     execution_enabled: bool = False
     execution_mode: str = "simulation"
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        return [
+            origin.strip()
+            for origin in self.cors_origins.split(",")
+            if origin.strip()
+        ]
 
 
 @lru_cache
