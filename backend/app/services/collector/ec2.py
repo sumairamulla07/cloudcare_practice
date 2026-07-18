@@ -122,6 +122,40 @@ def list_instances(session, region: str) -> list[dict]:
     return resources
 
 
+class EC2Collector:
+    def __init__(self, client_factory, region: str):
+        self.client_factory = client_factory
+        self.region = region
+
+    def collect(self) -> list[dict]:
+        ec2 = self.client_factory.client("ec2", region_name=self.region)
+        paginator = ec2.get_paginator("describe_instances")
+        collected_at = datetime.now(timezone.utc)
+        resources: list[dict] = []
+
+        try:
+            for page in paginator.paginate():
+                for reservation in page.get("Reservations", []):
+                    for instance in reservation.get("Instances", []):
+                        resources.append(
+                            normalize_instance(
+                                instance=instance,
+                                region=self.region,
+                                collected_at=collected_at,
+                            )
+                        )
+        except ClientError as error:
+            error_code = error.response.get("Error", {}).get(
+                "Code",
+                "UNKNOWN_AWS_ERROR",
+            )
+            raise EC2CollectionError(
+                f"EC2 collection failed: {error_code}"
+            ) from error
+
+        return resources
+
+
 def collect_ec2_inventory(region: str | None = None) -> dict:
     settings = get_settings()
     target_region = region or settings.aws_region
