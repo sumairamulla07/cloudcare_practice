@@ -44,6 +44,7 @@ from app.models.schemas import (
     WebAuthnRegisterFinishRequest,
     WebAuthnAuthenticateBeginRequest,
     WebAuthnAuthenticateFinishRequest,
+    RegisterRequest,
 )
 
 router = APIRouter(prefix="/v1/auth", tags=["auth"])
@@ -862,4 +863,40 @@ async def get_me(current_user: dict = Depends(get_current_user)):
         "email": current_user["email"],
         "tenant_id": current_user.get("tenant_id", "demo-tenant")
     }
+
+
+@router.post("/register")
+async def register(payload: RegisterRequest):
+    """Register a new user account with Password/Email (pre-enrollment for 3FA)."""
+    db = get_db()
+    
+    # Check if user already exists
+    existing_user = await db.users.find_one({"user_id": payload.user_id})
+    if existing_user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User ID is already registered.",
+        )
+        
+    # Check if email is already used
+    existing_email = await db.users.find_one({"email": payload.email})
+    if existing_email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email address is already in use.",
+        )
+        
+    # Hash password and store user
+    hashed = pwd_context.hash(payload.password)
+    await db.users.insert_one({
+        "user_id": payload.user_id,
+        "hashed_password": hashed,
+        "email": payload.email,
+        "tenant_id": payload.tenant_id,
+        "failed_login_attempts": 0,
+    })
+    
+    await log_auth_event(db, payload.user_id, "register.success", {"email": payload.email})
+    return {"message": "Account created successfully. You can now log in."}
+
 

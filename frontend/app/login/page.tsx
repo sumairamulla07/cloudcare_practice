@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter } from "navigation";
 import Link from "next/link";
 import { startRegistration, startAuthentication } from "@simplewebauthn/browser";
 import { saveSession } from "@/lib/auth";
@@ -10,23 +10,27 @@ const BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000"
 
 type Step = "password" | "otp" | "webauthn";
 type WebAuthnMode = "checking" | "register" | "authenticate" | "unsupported" | "error";
+type FormMode = "login" | "register";
 
 export default function LoginPage() {
   const router = useRouter();
   
   // Input fields
   const [userId, setUserId] = useState("");
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [otp, setOtp] = useState("");
   
-  // Wizard steps
+  // Wizard steps & mode
   const [step, setStep] = useState<Step>("password");
+  const [formMode, setFormMode] = useState<FormMode>("login");
   const [tempToken, setTempToken] = useState("");
   const [nextWebauthnStatus, setNextWebauthnStatus] = useState<"webauthn_required" | "webauthn_registration_required">("webauthn_registration_required");
   
   // States
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [successMessage, setSuccessMessage] = useState("");
   const [timer, setTimer] = useState(300); // 5 minutes
   const [resendCooldown, setResendCooldown] = useState(60); // 60 seconds
   const [webauthnMode, setWebauthnMode] = useState<WebAuthnMode>("checking");
@@ -52,33 +56,61 @@ export default function LoginPage() {
     return `${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
   };
 
-  // Step 1: Submit Password
-  const handlePasswordSubmit = async (e: React.FormEvent) => {
+  // Submit Password (Step 1) or Register Account
+  const handlePasswordOrRegisterSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!userId || !password) {
-      setError("Please fill in all fields.");
-      return;
-    }
     setError("");
-    setLoading(true);
-    try {
-      const res = await fetch(`${BASE_URL}/v1/auth/login`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ user_id: userId, password }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.detail || "Invalid User ID or Password");
+    setSuccessMessage("");
+
+    if (formMode === "register") {
+      if (!userId || !email || !password) {
+        setError("Please fill in all fields.");
+        return;
       }
-      setTempToken(data.temp_token);
-      setStep("otp");
-      setTimer(300);
-      setResendCooldown(60);
-    } catch (err: any) {
-      setError(err.message || "Connection error to authentication server.");
-    } finally {
-      setLoading(false);
+      setLoading(true);
+      try {
+        const res = await fetch(`${BASE_URL}/v1/auth/register`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ user_id: userId, email, password }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.detail || "Account registration failed.");
+        }
+        setSuccessMessage("Account created successfully! Please log in below.");
+        setFormMode("login");
+        setPassword(""); // Clear password for security
+      } catch (err: any) {
+        setError(err.message || "Connection error to registration server.");
+      } finally {
+        setLoading(false);
+      }
+    } else {
+      if (!userId || !password) {
+        setError("Please enter your user ID and password.");
+        return;
+      }
+      setLoading(true);
+      try {
+        const res = await fetch(`${BASE_URL}/v1/auth/login`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ user_id: userId, password }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.detail || "Invalid User ID or Password");
+        }
+        setTempToken(data.temp_token);
+        setStep("otp");
+        setTimer(300);
+        setResendCooldown(60);
+      } catch (err: any) {
+        setError(err.message || "Connection error to authentication server.");
+      } finally {
+        setLoading(false);
+      }
     }
   };
 
@@ -209,7 +241,6 @@ export default function LoginPage() {
       }
     } catch (err: any) {
       console.warn("WebAuthn Error:", err);
-      // Don't treat cancelation or lack of device setup as a dead-end, show options
       setError(err.message || "Biometric validation canceled or key not recognized.");
       setWebauthnMode("error");
     } finally {
@@ -250,15 +281,20 @@ export default function LoginPage() {
 
         <div className="bg-surface border border-line rounded-lg2 shadow-soft p-8 transition-all duration-300">
           
-          {/* STEP 1: PASSWORD */}
+          {/* STEP 1: PASSWORD OR REGISTER */}
           {step === "password" && (
             <>
-              <h1 className="font-display text-xl font-semibold text-ink mb-1">Welcome back</h1>
-              <p className="text-sm text-inkSoft mb-6">Log in to view your cloud cost dashboard.</p>
+              <h1 className="font-display text-xl font-semibold text-ink mb-1">
+                {formMode === "login" ? "Welcome back" : "Create an Account"}
+              </h1>
+              <p className="text-sm text-inkSoft mb-6">
+                {formMode === "login" ? "Log in to view your cloud cost dashboard." : "Sign up below to protect your dashboard."}
+              </p>
               
+              {successMessage && <div className="mb-4 p-3 bg-green-50 border border-green-200 text-green-600 rounded-lg text-xs font-medium">{successMessage}</div>}
               {error && <div className="mb-4 p-3 bg-red-50 border border-red-200 text-red-600 rounded-lg text-xs font-medium">{error}</div>}
 
-              <form onSubmit={handlePasswordSubmit} className="flex flex-col gap-4">
+              <form onSubmit={handlePasswordOrRegisterSubmit} className="flex flex-col gap-4">
                 <div>
                   <label className="block text-[12.5px] font-semibold text-inkSoft mb-1.5">User ID</label>
                   <input
@@ -270,6 +306,21 @@ export default function LoginPage() {
                     className="w-full border-[1.5px] border-line rounded-lg px-3.5 py-3 text-[14.5px] bg-bg focus:outline-none focus:border-brandBlue focus:shadow-[0_0_0_4px_rgba(47,102,144,0.12)] transition-all disabled:opacity-50"
                   />
                 </div>
+
+                {formMode === "register" && (
+                  <div>
+                    <label className="block text-[12.5px] font-semibold text-inkSoft mb-1.5">Email Address</label>
+                    <input
+                      type="email"
+                      value={email}
+                      onChange={(e) => setEmail(e.target.value)}
+                      placeholder="teamalpha817@gmail.com"
+                      disabled={loading}
+                      className="w-full border-[1.5px] border-line rounded-lg px-3.5 py-3 text-[14.5px] bg-bg focus:outline-none focus:border-brandBlue focus:shadow-[0_0_0_4px_rgba(47,102,144,0.12)] transition-all disabled:opacity-50"
+                    />
+                  </div>
+                )}
+
                 <div>
                   <label className="block text-[12.5px] font-semibold text-inkSoft mb-1.5">Password</label>
                   <input
@@ -281,17 +332,35 @@ export default function LoginPage() {
                     className="w-full border-[1.5px] border-line rounded-lg px-3.5 py-3 text-[14.5px] bg-bg focus:outline-none focus:border-brandBlue focus:shadow-[0_0_0_4px_rgba(47,102,144,0.12)] transition-all disabled:opacity-50"
                   />
                 </div>
+
                 <button
                   type="submit"
                   disabled={loading}
                   className="mt-2 inline-flex items-center justify-center rounded-full bg-ink px-6 py-3 text-sm font-semibold text-white hover:-translate-y-0.5 hover:shadow-[0_10px_20px_-8px_rgba(16,34,46,0.4)] transition-all disabled:opacity-50"
                 >
-                  {loading ? "Verifying..." : "Verify Password"}
+                  {loading ? (formMode === "login" ? "Verifying..." : "Creating...") : (formMode === "login" ? "Verify Password" : "Create Account")}
                 </button>
               </form>
-              <p className="text-center text-[12.5px] text-inkFaint mt-5">
-                Demo Credentials: <strong>demo.user</strong> / <strong>password123</strong>
-              </p>
+
+              <div className="mt-5 text-center border-t border-line pt-4">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setFormMode(formMode === "login" ? "register" : "login");
+                    setError("");
+                    setSuccessMessage("");
+                  }}
+                  className="text-[12.5px] font-semibold text-brandBlue hover:text-brandBlue/80 transition-colors"
+                >
+                  {formMode === "login" ? "Don't have an account? Sign up" : "Already have an account? Log in"}
+                </button>
+              </div>
+
+              {formMode === "login" && (
+                <p className="text-center text-[12.5px] text-inkFaint mt-4">
+                  Demo Credentials: <strong>demo.user</strong> / <strong>password123</strong>
+                </p>
+              )}
             </>
           )}
 
@@ -299,7 +368,7 @@ export default function LoginPage() {
           {step === "otp" && (
             <>
               <h1 className="font-display text-xl font-semibold text-ink mb-1">Enter Verification Code</h1>
-              <p className="text-sm text-inkSoft mb-6">We've sent a 6-digit OTP code to your registered email (and console output).</p>
+              <p className="text-sm text-inkSoft mb-6">We've sent a 6-digit OTP code to your registered email.</p>
 
               {error && <div className="mb-4 p-3 bg-red-50 border border-red-200 text-red-600 rounded-lg text-xs font-medium">{error}</div>}
 
