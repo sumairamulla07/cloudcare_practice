@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     openrouter_api_key: str = ""
     llm_model: str = "anthropic/claude-3.5-sonnet"
 
+    execution_enabled: bool = False
+    execution_mode: str = "simulation"
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
