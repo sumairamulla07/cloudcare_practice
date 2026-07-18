@@ -63,10 +63,17 @@ async def ensure_demo_user(db):
         await db.users.insert_one({
             "user_id": "demo.user",
             "hashed_password": hashed,
-            "email": "demo.user@example.com",
+            "email": "teamalpha817@gmail.com",
             "tenant_id": "demo-tenant",
             "failed_login_attempts": 0,
         })
+    else:
+        # Update email to match current settings if it changed
+        if user.get("email") != "teamalpha817@gmail.com":
+            await db.users.update_one(
+                {"user_id": "demo.user"},
+                {"$set": {"email": "teamalpha817@gmail.com"}}
+            )
 
 
 async def log_auth_event(db, user_id: str, event_type: str, details: dict):
