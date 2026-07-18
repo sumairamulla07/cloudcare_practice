@@ -9,10 +9,10 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-from app.config import get_settings
-from app.services.collector.aws_session import aws_client
-from app.services.collector.cloudwatch import CloudWatchCollector
-from app.services.collector.cost_explorer import CostExplorerCollector
+from app.core.config import get_settings
+from app.services.aws.cloudwatch_collector import CloudWatchCollector
+from app.services.aws.cost_collector import CostExplorerCollector
+from app.services.aws.session import AWSClientFactory
 
 
 def list_instance_ids(ec2_client: Any) -> list[str]:
@@ -32,18 +32,19 @@ def list_instance_ids(ec2_client: Any) -> list[str]:
 
 def main() -> None:
     settings = get_settings()
+    factory = AWSClientFactory(settings)
 
-    ec2_client = aws_client(
+    ec2_client = factory.client(
         "ec2",
         region_name=settings.aws_region,
     )
 
-    cloudwatch_client = aws_client(
+    cloudwatch_client = factory.client(
         "cloudwatch",
         region_name=settings.aws_region,
     )
 
-    cost_explorer_client = aws_client(
+    cost_explorer_client = factory.client(
         "ce",
         region_name="us-east-1",
     )

@@ -1,6 +1,6 @@
 from typing import Any, TypedDict
 
-from app.services.collector.collector_service import AWSCollectorService
+from app.services.aws.collector_service import AWSCollectorService
 
 
 class MonitorState(TypedDict, total=False):

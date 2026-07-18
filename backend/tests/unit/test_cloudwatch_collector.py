@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from unittest.mock import Mock
 
-from app.services.collector.cloudwatch import CloudWatchCollector
+from app.services.aws.cloudwatch_collector import CloudWatchCollector
 
 
 def test_collect_cpu_metrics_returns_normalized_result() -> None:

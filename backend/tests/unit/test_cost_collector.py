@@ -3,7 +3,7 @@ from unittest.mock import Mock
 
 from botocore.exceptions import ClientError
 
-from app.services.collector.cost_explorer import CostExplorerCollector
+from app.services.aws.cost_collector import CostExplorerCollector
 
 
 def test_collect_daily_costs_returns_normalized_results() -> None:

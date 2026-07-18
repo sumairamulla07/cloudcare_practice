@@ -6,21 +6,9 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-from app.config import get_settings
-from app.services.collector.aws_session import aws_client
-from app.services.collector.collector_service import AWSCollectorService
-
-
-class AWSClientFactoryAdapter:
-    def client(
-        self,
-        service_name: str,
-        region_name: str | None = None,
-    ):
-        return aws_client(
-            service_name,
-            region_name=region_name,
-        )
+from app.core.config import get_settings
+from app.services.aws.collector_service import AWSCollectorService
+from app.services.aws.session import AWSClientFactory
 
 
 def extract_account_id(role_arn: str) -> str:
@@ -34,12 +22,13 @@ def extract_account_id(role_arn: str) -> str:
 
 def main() -> None:
     settings = get_settings()
+    factory = AWSClientFactory(settings)
 
     service = AWSCollectorService(
-        client_factory=AWSClientFactoryAdapter(),
+        client_factory=factory,
         region=settings.aws_region,
         account_id=extract_account_id(
-            settings.aws_read_role_arn
+            settings.aws_role_arn
         ),
         cost_cache_hours=6,
     )

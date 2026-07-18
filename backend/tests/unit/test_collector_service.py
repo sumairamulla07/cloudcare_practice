@@ -6,21 +6,21 @@ from app.schemas.cloud_metrics import (
     DailyCost,
     EC2CpuMetric,
 )
-from app.services.collector.collector_service import (
+from app.services.aws.collector_service import (
     AWSCollectorService,
 )
 
 
 @patch(
-    "app.services.collector.collector_service."
+    "app.services.aws.collector_service."
     "CostExplorerCollector"
 )
 @patch(
-    "app.services.collector.collector_service."
+    "app.services.aws.collector_service."
     "CloudWatchCollector"
 )
 @patch(
-    "app.services.collector.collector_service.EC2Collector"
+    "app.services.aws.collector_service.EC2Collector"
 )
 def test_collect_snapshot_success(
     ec2_collector_class,
@@ -77,15 +77,15 @@ def test_collect_snapshot_success(
 
 
 @patch(
-    "app.services.collector.collector_service."
+    "app.services.aws.collector_service."
     "CostExplorerCollector"
 )
 @patch(
-    "app.services.collector.collector_service."
+    "app.services.aws.collector_service."
     "CloudWatchCollector"
 )
 @patch(
-    "app.services.collector.collector_service.EC2Collector"
+    "app.services.aws.collector_service.EC2Collector"
 )
 def test_cost_results_are_cached(
     ec2_collector_class,
@@ -119,11 +119,11 @@ def test_cost_results_are_cached(
 
 
 @patch(
-    "app.services.collector.collector_service."
+    "app.services.aws.collector_service."
     "CostExplorerCollector"
 )
 @patch(
-    "app.services.collector.collector_service.EC2Collector"
+    "app.services.aws.collector_service.EC2Collector"
 )
 def test_snapshot_can_return_partial_status(
     ec2_collector_class,

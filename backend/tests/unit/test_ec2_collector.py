@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from app.services.collector.ec2 import (
+from app.services.aws.ec2_collector import (
     normalize_environment,
     normalize_instance,
     tags_to_dictionary,
@@ -74,7 +74,7 @@ def test_normalize_instance():
         collected_at=datetime.now(timezone.utc),
     )
 
-    assert result["resource_id"] == "i-test123"
-    assert result["name"] == "cloudcare-demo"
-    assert result["environment"] == "development"
-    assert result["state"] == "running"
+    assert result.resource_id == "i-test123"
+    assert result.name == "cloudcare-demo"
+    assert result.environment == "development"
+    assert result.state == "running"
