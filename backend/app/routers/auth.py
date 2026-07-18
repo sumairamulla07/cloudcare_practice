@@ -1,36 +1,52 @@
 """
-Demo auth router.
+Real auth router (Days 2-4 task — replaces the demo placeholder).
 
-PLACEHOLDER: this accepts ANY user_id/password and returns a fake token —
-exactly like the frontend's lib/auth.ts demo login. It exists so the
-frontend has a real endpoint to call instead of only faking it client-side.
+Flow:
+  1. /register creates a user in MongoDB with a bcrypt-hashed password.
+  2. /login looks the user up by user_id, verifies the password with
+     passlib, and issues a real JWT (python-jose) signed with
+     settings.jwt_secret.
 
-To make this real before you go further than the hackathon:
-  1. Add a `users` collection in MongoDB (user_id, hashed_password, tenant_id).
-  2. On login, look up the user, verify the password with passlib (bcrypt).
-  3. Issue a real JWT (python-jose is already in requirements.txt) signed
-     with settings.jwt_secret, and return it.
-  4. Set it as an httpOnly cookie from the frontend's API route, or have the
-     frontend store it in memory and send it as a Bearer token — not
-     localStorage, which is vulnerable to XSS.
-  5. Add a dependency (e.g. `get_current_user`) that other routers use to
-     require auth, and enforce tenant_id scoping on every query.
+Tenant-scoped middleware (a `get_current_user` dependency used by every
+other router) is a Days 5-7 task and intentionally not built here yet.
 """
 
-import uuid
+from fastapi import APIRouter, HTTPException
 
-from fastapi import APIRouter
-
-from app.models.schemas import LoginRequest, LoginResponse
+from app.db import get_db
+from app.models.schemas import LoginRequest, LoginResponse, RegisterRequest, UserPublic
+from app.security import create_access_token, hash_password, verify_password
 
 router = APIRouter(prefix="/v1/auth", tags=["auth"])
 
 
+@router.post("/register", response_model=UserPublic, status_code=201)
+async def register(payload: RegisterRequest) -> UserPublic:
+    db = get_db()
+
+    existing = await db.users.find_one({"user_id": payload.user_id})
+    if existing:
+        raise HTTPException(status_code=409, detail="user_id already registered")
+
+    user_doc = {
+        "user_id": payload.user_id,
+        "tenant_id": payload.tenant_id,
+        "hashed_password": hash_password(payload.password),
+        "full_name": payload.full_name,
+    }
+    await db.users.insert_one(user_doc)
+
+    return UserPublic(user_id=payload.user_id, tenant_id=payload.tenant_id, full_name=payload.full_name)
+
+
 @router.post("/login", response_model=LoginResponse)
 async def login(payload: LoginRequest) -> LoginResponse:
-    # TODO: replace with real lookup + password verification against MongoDB
-    fake_token = f"demo-{uuid.uuid4().hex[:24]}"
-    return LoginResponse(
-        access_token=fake_token,
-        user_id=payload.user_id or "Demo User",
-    )
+    db = get_db()
+
+    user = await db.users.find_one({"user_id": payload.user_id})
+    if not user or not verify_password(payload.password, user["hashed_password"]):
+        # Same error for "no such user" and "wrong password" — don't leak which one.
+        raise HTTPException(status_code=401, detail="Invalid user_id or password")
+
+    token = create_access_token(user_id=user["user_id"], tenant_id=user["tenant_id"])
+    return LoginResponse(access_token=token, user_id=user["user_id"], tenant_id=user["tenant_id"])

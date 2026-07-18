@@ -109,7 +109,7 @@ class SavingsSummary(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Auth (demo — see routers/auth.py for the placeholder flow)
+# Auth (blueprint 4.1 core entities — User + Tenant)
 # ---------------------------------------------------------------------------
 
 class LoginRequest(BaseModel):
@@ -121,3 +121,41 @@ class LoginResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     user_id: str
+    tenant_id: str
+
+
+class RegisterRequest(BaseModel):
+    user_id: str
+    password: str
+    tenant_id: str = "demo-tenant"
+    full_name: str | None = None
+
+
+class UserPublic(BaseModel):
+    """Safe-to-return shape — never includes hashed_password."""
+    user_id: str
+    tenant_id: str
+    full_name: str | None = None
+
+
+class UserInDB(BaseModel):
+    """Mirrors the `users` Mongo collection (blueprint 4.1 Tenant/User)."""
+    user_id: str
+    tenant_id: str
+    hashed_password: str
+    full_name: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# CloudAccount (blueprint 4.1 — secure onboarding)
+# ---------------------------------------------------------------------------
+
+class CloudAccount(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    tenant_id: str
+    provider: Literal["aws"] = "aws"
+    account_id: str
+    role_arn: str
+    external_id: str
+    region: str = "ap-south-1"
+    status: Literal["pending", "validated", "failed"] = "pending"
