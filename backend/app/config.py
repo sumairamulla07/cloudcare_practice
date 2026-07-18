@@ -21,6 +21,19 @@ class Settings(BaseSettings):
     # Auth — PLACEHOLDER, replace with a real secret before shipping
     jwt_secret: str = "dev-only-insecure-secret-change-me"
     jwt_expire_minutes: int = 60
+    jwt_algorithm: str = "HS256"
+
+    # SMTP
+    smtp_host: str = "smtp.gmail.com"
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from: str = ""
+
+    # WebAuthn
+    webauthn_rp_id: str = "localhost"
+    webauthn_rp_name: str = "CloudCare"
+    webauthn_origin: str = "http://localhost:3000"
 
     # AWS — PLACEHOLDER, only needed once a real sandbox account is connected
     aws_region: str = "ap-south-1"

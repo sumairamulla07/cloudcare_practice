@@ -1,13 +1,18 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
 from app.mock_data import RESOURCES
 from app.models.schemas import Resource
+from app.routers.auth import get_current_user
 
 router = APIRouter(prefix="/v1/resources", tags=["resources"])
 
 
 @router.get("", response_model=list[Resource])
-async def list_resources(environment: str | None = None, status: str | None = None) -> list[Resource]:
+async def list_resources(
+    environment: str | None = None,
+    status: str | None = None,
+    current_user: dict = Depends(get_current_user)
+) -> list[Resource]:
     """
     List monitored resources, optionally filtered by environment or status.
 

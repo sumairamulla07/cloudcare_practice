@@ -1,15 +1,20 @@
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
 from app.models.schemas import CloudCareState
+from app.routers.auth import get_current_user
 
 router = APIRouter(prefix="/v1", tags=["accounts-runs"])
 
 
 @router.post("/cloud-accounts/validate")
-async def validate_cloud_account(role_arn: str, external_id: str) -> dict:
+async def validate_cloud_account(
+    role_arn: str,
+    external_id: str,
+    current_user: dict = Depends(get_current_user)
+) -> dict:
     """
     PLACEHOLDER: this should call sts.assume_role() (blueprint 9.2,
     app/services/collector) using the given role_arn + external_id, then
@@ -28,7 +33,11 @@ async def validate_cloud_account(role_arn: str, external_id: str) -> dict:
 
 
 @router.post("/runs", response_model=CloudCareState)
-async def start_run(tenant_id: str = "demo-tenant", account_id: str = "demo-account") -> CloudCareState:
+async def start_run(
+    tenant_id: str = "demo-tenant",
+    account_id: str = "demo-account",
+    current_user: dict = Depends(get_current_user)
+) -> CloudCareState:
     """
     PLACEHOLDER: this should call build_graph().invoke(...) from
     app/services/orchestrator/graph.py to actually kick off the

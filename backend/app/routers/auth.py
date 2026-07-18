@@ -1,36 +1,858 @@
 """
-Demo auth router.
-
-PLACEHOLDER: this accepts ANY user_id/password and returns a fake token —
-exactly like the frontend's lib/auth.ts demo login. It exists so the
-frontend has a real endpoint to call instead of only faking it client-side.
-
-To make this real before you go further than the hackathon:
-  1. Add a `users` collection in MongoDB (user_id, hashed_password, tenant_id).
-  2. On login, look up the user, verify the password with passlib (bcrypt).
-  3. Issue a real JWT (python-jose is already in requirements.txt) signed
-     with settings.jwt_secret, and return it.
-  4. Set it as an httpOnly cookie from the frontend's API route, or have the
-     frontend store it in memory and send it as a Bearer token — not
-     localStorage, which is vulnerable to XSS.
-  5. Add a dependency (e.g. `get_current_user`) that other routers use to
-     require auth, and enforce tenant_id scoping on every query.
+CloudCare Security & QA Module — 3FA Authentication Router.
+Wired to MongoDB, supporting Password (bcrypt) -> OTP (Email/console) -> WebAuthn (py_webauthn) -> JWT.
 """
 
+import datetime
 import uuid
+import secrets
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from typing import Literal
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, status, Response, Request
+from fastapi.security import OAuth2PasswordBearer
+from jose import JWTError, jwt
+from passlib.context import CryptContext
 
-from app.models.schemas import LoginRequest, LoginResponse
+from webauthn import (
+    generate_registration_options,
+    verify_registration_response,
+    generate_authentication_options,
+    verify_authentication_response,
+    options_to_json,
+)
+from webauthn.helpers import bytes_to_base64url, base64url_to_bytes
+from webauthn.helpers.structs import (
+    AttestationConveyancePreference,
+    AuthenticatorSelectionCriteria,
+    UserVerificationRequirement,
+    PublicKeyCredentialDescriptor,
+)
+
+from app.config import get_settings
+from app.db import get_db
+from app.models.schemas import (
+    LoginRequest,
+    LoginResponse,
+    LoginStep1Response,
+    OtpVerifyRequest,
+    OtpVerifyResponse,
+    OtpResendRequest,
+    WebAuthnRegisterBeginRequest,
+    WebAuthnRegisterFinishRequest,
+    WebAuthnAuthenticateBeginRequest,
+    WebAuthnAuthenticateFinishRequest,
+)
 
 router = APIRouter(prefix="/v1/auth", tags=["auth"])
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="v1/auth/login", auto_error=False)
 
 
-@router.post("/login", response_model=LoginResponse)
-async def login(payload: LoginRequest) -> LoginResponse:
-    # TODO: replace with real lookup + password verification against MongoDB
-    fake_token = f"demo-{uuid.uuid4().hex[:24]}"
-    return LoginResponse(
-        access_token=fake_token,
-        user_id=payload.user_id or "Demo User",
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+async def ensure_demo_user(db):
+    """Seed the default demo user if they don't exist yet."""
+    user = await db.users.find_one({"user_id": "demo.user"})
+    if not user:
+        hashed = pwd_context.hash("password123")
+        await db.users.insert_one({
+            "user_id": "demo.user",
+            "hashed_password": hashed,
+            "email": "demo.user@example.com",
+            "tenant_id": "demo-tenant",
+            "failed_login_attempts": 0,
+        })
+
+
+async def log_auth_event(db, user_id: str, event_type: str, details: dict):
+    """Log security events to stdout and store in MongoDB audit_logs collection."""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    print(f"[AUDIT LOG] {now.isoformat()} - User: {user_id} - Event: {event_type} - Details: {details}")
+    try:
+        await db.audit_logs.insert_one({
+            "user_id": user_id,
+            "event_type": event_type,
+            "details": details,
+            "timestamp": now
+        })
+    except Exception as e:
+        print(f"Failed to write audit log: {e}")
+
+
+def send_otp_email_sync(to_email: str, otp: str, settings):
+    """Synchronous function to send email via SMTP, falls back to logging."""
+    print(f"==================================================")
+    print(f"OTP Email to {to_email}: Your CloudCare OTP is {otp}")
+    print(f"==================================================")
+    
+    if not settings.smtp_username or not settings.smtp_password:
+        return
+        
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = "CloudCare — Your Verification Code"
+        msg["From"] = settings.smtp_from or settings.smtp_username
+        msg["To"] = to_email
+        
+        html = f"""
+        <html>
+          <body style="font-family: sans-serif; padding: 20px; color: #10222E; background-color: #F7FAF9;">
+            <div style="max-width: 480px; margin: 0 auto; background: #FFFFFF; border: 1px solid #E4EBE8; border-radius: 8px; padding: 30px; box-shadow: 0 4px 12px rgba(0,0,0,0.03);">
+              <h2 style="margin-top: 0; color: #2F6690;">CloudCare Verification</h2>
+              <p>Your one-time verification code is:</p>
+              <div style="font-size: 32px; font-weight: bold; letter-spacing: 4px; padding: 15px; background: #E4EBE8; border-radius: 6px; text-align: center; margin: 20px 0;">
+                {otp}
+              </div>
+              <p style="font-size: 13px; color: #627785;">This code will expire in 5 minutes. If you did not request this code, please ignore this email.</p>
+            </div>
+          </body>
+        </html>
+        """
+        msg.attach(MIMEText(html, "html"))
+        
+        with smtplib.SMTP(settings.smtp_host, settings.smtp_port) as server:
+            server.starttls()
+            server.login(settings.smtp_username, settings.smtp_password)
+            server.sendmail(msg["From"], [to_email], msg.as_string())
+    except Exception as e:
+        print(f"Error sending SMTP email: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Auth Dependency
+# ---------------------------------------------------------------------------
+
+async def get_current_user(request: Request, token: str = Depends(oauth2_scheme)):
+    """Tenant-scoped user dependency guarding protected endpoints."""
+    settings = get_settings()
+    db = get_db()
+    
+    actual_token = token
+    if not actual_token:
+        actual_token = request.cookies.get("access_token")
+        
+    if not actual_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication credentials were not provided",
+        )
+        
+    try:
+        payload = jwt.decode(actual_token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
+        user_id = payload.get("sub")
+        if not user_id or payload.get("type") != "access":
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token claims",
+            )
+    except JWTError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired authentication token",
+        )
+        
+    await ensure_demo_user(db)
+    user = await db.users.find_one({"user_id": user_id})
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found",
+        )
+        
+    return user
+
+
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
+
+@router.post("/login", response_model=LoginStep1Response)
+async def login(payload: LoginRequest, background_tasks: BackgroundTasks) -> LoginStep1Response:
+    """Step 1: Password authentication. Triggers OTP send."""
+    db = get_db()
+    settings = get_settings()
+    now = datetime.datetime.now(datetime.timezone.utc)
+    
+    await ensure_demo_user(db)
+    
+    user = await db.users.find_one({"user_id": payload.user_id})
+    if not user:
+        # Uniform error message to prevent user enumeration
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid user ID or password",
+        )
+        
+    # Check brute-force lockout
+    locked_until = user.get("locked_until")
+    if locked_until:
+        if isinstance(locked_until, str):
+            locked_until = datetime.datetime.fromisoformat(locked_until)
+        if locked_until > now:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Account temporarily locked due to too many failed attempts. Try again later.",
+            )
+            
+    # Verify password
+    if not pwd_context.verify(payload.password, user["hashed_password"]):
+        attempts = user.get("failed_login_attempts", 0) + 1
+        await db.users.update_one(
+            {"user_id": payload.user_id},
+            {"$set": {"failed_login_attempts": attempts}}
+        )
+        await log_auth_event(db, payload.user_id, "login.password_failure", {"attempts": attempts})
+        
+        if attempts >= 5:
+            locked_until_time = now + datetime.timedelta(minutes=15)
+            await db.users.update_one(
+                {"user_id": payload.user_id},
+                {"$set": {"locked_until": locked_until_time}}
+            )
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many failed attempts. Account locked for 15 minutes.",
+            )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid user ID or password",
+        )
+        
+    # Reset attempts on success
+    await db.users.update_one(
+        {"user_id": payload.user_id},
+        {"$set": {"failed_login_attempts": 0}, "$unset": {"locked_until": ""}}
     )
+    
+    # Check rate limit on OTP generation (max 1 OTP per 60 seconds)
+    last_otp_sent = user.get("last_otp_sent")
+    if last_otp_sent:
+        if isinstance(last_otp_sent, str):
+            last_otp_sent = datetime.datetime.fromisoformat(last_otp_sent)
+        if (now - last_otp_sent).total_seconds() < 60:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Please wait 60 seconds before requesting another verification code.",
+            )
+            
+    # Secure OTP generation
+    otp = "".join(secrets.choice("0123456789") for _ in range(6))
+    otp_expires_at = now + datetime.timedelta(minutes=5)
+    
+    session_id = str(uuid.uuid4())
+    await db.sessions.update_one(
+        {"user_id": payload.user_id},
+        {
+            "$set": {
+                "session_id": session_id,
+                "otp_code": otp,
+                "otp_expires_at": otp_expires_at,
+                "otp_attempts": 0,
+                "otp_verified": False,
+                "updated_at": now
+            }
+        },
+        upsert=True
+    )
+    
+    await db.users.update_one(
+        {"user_id": payload.user_id},
+        {"$set": {"last_otp_sent": now}}
+    )
+    
+    # Send email in background
+    background_tasks.add_task(send_otp_email_sync, user["email"], otp, settings)
+    await log_auth_event(db, payload.user_id, "otp.sent", {"expires_at": otp_expires_at.isoformat()})
+    
+    # Issue short-lived temp token
+    temp_payload = {
+        "sub": payload.user_id,
+        "session_id": session_id,
+        "type": "temp_auth",
+        "step": "otp",
+        "exp": now + datetime.timedelta(minutes=10)
+    }
+    temp_token = jwt.encode(temp_payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+    
+    return LoginStep1Response(
+        status="otp_required",
+        user_id=payload.user_id,
+        temp_token=temp_token
+    )
+
+
+@router.post("/otp/verify", response_model=OtpVerifyResponse)
+async def verify_otp(payload: OtpVerifyRequest) -> OtpVerifyResponse:
+    """Step 2: Verify OTP. Returns whether WebAuthn registration or authentication is required."""
+    db = get_db()
+    settings = get_settings()
+    now = datetime.datetime.now(datetime.timezone.utc)
+    
+    try:
+        token_data = jwt.decode(payload.temp_token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
+        user_id = token_data.get("sub")
+        session_id = token_data.get("session_id")
+        token_type = token_data.get("type")
+        step = token_data.get("step")
+        if token_type != "temp_auth" or step != "otp" or not user_id or not session_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid temporary authentication token",
+            )
+    except JWTError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired temporary authentication token",
+        )
+        
+    session = await db.sessions.find_one({"session_id": session_id, "user_id": user_id})
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Session not found or expired",
+        )
+        
+    # Check lockout
+    user = await db.users.find_one({"user_id": user_id})
+    locked_until = user.get("locked_until")
+    if locked_until:
+        if isinstance(locked_until, str):
+            locked_until = datetime.datetime.fromisoformat(locked_until)
+        if locked_until > now:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUEST,
+                detail="Account temporarily locked. Try again later.",
+            )
+            
+    # Check OTP expiration
+    otp_expires_at = session.get("otp_expires_at")
+    if isinstance(otp_expires_at, str):
+        otp_expires_at = datetime.datetime.fromisoformat(otp_expires_at)
+    if otp_expires_at < now:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Verification code has expired. Please request a new one.",
+        )
+        
+    # Check attempts
+    attempts = session.get("otp_attempts", 0)
+    if attempts >= 5:
+        locked_until_time = now + datetime.timedelta(minutes=15)
+        await db.users.update_one(
+            {"user_id": user_id},
+            {"$set": {"locked_until": locked_until_time}}
+        )
+        await log_auth_event(db, user_id, "otp.lockout", {"attempts": attempts})
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUEST,
+            detail="Too many failed verification attempts. Account locked for 15 minutes.",
+        )
+        
+    # Verify OTP
+    if session.get("otp_code") != payload.otp:
+        await db.sessions.update_one(
+            {"session_id": session_id},
+            {"$inc": {"otp_attempts": 1}}
+        )
+        await log_auth_event(db, user_id, "otp.verified_failure", {"attempts": attempts + 1})
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid verification code",
+        )
+        
+    # Success
+    await db.sessions.update_one(
+        {"session_id": session_id},
+        {"$set": {"otp_verified": True}, "$unset": {"otp_code": ""}}
+    )
+    await log_auth_event(db, user_id, "otp.verified_success", {})
+    
+    # Check WebAuthn status
+    credential = await db.webauthn_credentials.find_one({"user_id": user_id})
+    status_str = "webauthn_required" if credential else "webauthn_registration_required"
+    
+    # Issue a new temp_token for the WebAuthn phase
+    temp_payload = {
+        "sub": user_id,
+        "session_id": session_id,
+        "type": "temp_auth",
+        "step": "webauthn",
+        "exp": now + datetime.timedelta(minutes=10)
+    }
+    new_temp_token = jwt.encode(temp_payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+    
+    return OtpVerifyResponse(
+        status=status_str,
+        user_id=user_id,
+        temp_token=new_temp_token
+    )
+
+
+@router.post("/otp/resend")
+async def resend_otp(payload: OtpResendRequest, background_tasks: BackgroundTasks):
+    """Resend a new OTP if rate limits allow."""
+    db = get_db()
+    settings = get_settings()
+    now = datetime.datetime.now(datetime.timezone.utc)
+    
+    try:
+        token_data = jwt.decode(payload.temp_token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
+        user_id = token_data.get("sub")
+        session_id = token_data.get("session_id")
+        token_type = token_data.get("type")
+        step = token_data.get("step")
+        if token_type != "temp_auth" or step != "otp" or not user_id or not session_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid temporary authentication token",
+            )
+    except JWTError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired temporary authentication token",
+        )
+        
+    user = await db.users.find_one({"user_id": user_id})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+        
+    # Check rate limit (60 seconds)
+    last_otp_sent = user.get("last_otp_sent")
+    if last_otp_sent:
+        if isinstance(last_otp_sent, str):
+            last_otp_sent = datetime.datetime.fromisoformat(last_otp_sent)
+        if (now - last_otp_sent).total_seconds() < 60:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUEST,
+                detail="Please wait 60 seconds before requesting another verification code.",
+            )
+            
+    # Generate new OTP
+    otp = "".join(secrets.choice("0123456789") for _ in range(6))
+    otp_expires_at = now + datetime.timedelta(minutes=5)
+    
+    await db.sessions.update_one(
+        {"session_id": session_id},
+        {
+            "$set": {
+                "otp_code": otp,
+                "otp_expires_at": otp_expires_at,
+                "otp_attempts": 0,
+                "updated_at": now
+            }
+        }
+    )
+    
+    await db.users.update_one(
+        {"user_id": user_id},
+        {"$set": {"last_otp_sent": now}}
+    )
+    
+    background_tasks.add_task(send_otp_email_sync, user["email"], otp, settings)
+    await log_auth_event(db, user_id, "otp.resend", {"expires_at": otp_expires_at.isoformat()})
+    return {"message": "Verification code resent"}
+
+
+@router.post("/webauthn/register/begin")
+async def register_begin(payload: WebAuthnRegisterBeginRequest):
+    """Generate options for WebAuthn credential registration."""
+    db = get_db()
+    settings = get_settings()
+    
+    try:
+        token_data = jwt.decode(payload.temp_token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
+        user_id = token_data.get("sub")
+        session_id = token_data.get("session_id")
+        token_type = token_data.get("type")
+        step = token_data.get("step")
+        if token_type != "temp_auth" or step != "webauthn" or not user_id or not session_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid temporary authentication token",
+            )
+    except JWTError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired temporary authentication token",
+        )
+        
+    session = await db.sessions.find_one({"session_id": session_id, "user_id": user_id})
+    if not session or not session.get("otp_verified"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="OTP verification must be completed first",
+        )
+        
+    options = generate_registration_options(
+        rp_id=settings.webauthn_rp_id,
+        rp_name=settings.webauthn_rp_name,
+        user_id=user_id.encode("utf-8"),
+        user_name=user_id,
+        user_display_name=user_id,
+        attestation=AttestationConveyancePreference.NONE,
+        authenticator_selection=AuthenticatorSelectionCriteria(
+            user_verification=UserVerificationRequirement.PREFERRED
+        ),
+    )
+    
+    challenge_str = bytes_to_base64url(options.challenge)
+    await db.sessions.update_one(
+        {"session_id": session_id},
+        {"$set": {"webauthn_challenge": challenge_str}}
+    )
+    
+    await log_auth_event(db, user_id, "webauthn.register_begin", {})
+    import json
+    return json.loads(options_to_json(options))
+
+
+@router.post("/webauthn/register/finish")
+async def register_finish(payload: WebAuthnRegisterFinishRequest, response: Response):
+    """Verify WebAuthn credential registration response. Stores credential and issues access token."""
+    db = get_db()
+    settings = get_settings()
+    now = datetime.datetime.now(datetime.timezone.utc)
+    
+    try:
+        token_data = jwt.decode(payload.temp_token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
+        user_id = token_data.get("sub")
+        session_id = token_data.get("session_id")
+        token_type = token_data.get("type")
+        step = token_data.get("step")
+        if token_type != "temp_auth" or step != "webauthn" or not user_id or not session_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid temporary authentication token",
+            )
+    except JWTError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired temporary authentication token",
+        )
+        
+    session = await db.sessions.find_one({"session_id": session_id, "user_id": user_id})
+    if not session or not session.get("webauthn_challenge"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Registration has not been initiated",
+        )
+        
+    expected_challenge = base64url_to_bytes(session["webauthn_challenge"])
+    
+    try:
+        credential = parse_registration_credential_json(payload.registration_response)
+        verification = verify_registration_response(
+            credential=credential,
+            expected_challenge=expected_challenge,
+            expected_origin=settings.webauthn_origin,
+            expected_rp_id=settings.webauthn_rp_id,
+            require_user_verification=False,
+        )
+    except Exception as e:
+        await log_auth_event(db, user_id, "webauthn.register_finish_failure", {"error": str(e)})
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"WebAuthn registration verification failed: {e}",
+        )
+        
+    cred_id_str = bytes_to_base64url(verification.credential_id)
+    pub_key_str = bytes_to_base64url(verification.credential_public_key)
+    
+    await db.webauthn_credentials.update_one(
+        {"credential_id": cred_id_str},
+        {
+            "$set": {
+                "user_id": user_id,
+                "public_key": pub_key_str,
+                "sign_counter": verification.sign_counter,
+                "created_at": now
+            }
+        },
+        upsert=True
+    )
+    
+    await db.sessions.delete_one({"session_id": session_id})
+    await log_auth_event(db, user_id, "webauthn.register_finish_success", {"credential_id": cred_id_str})
+    
+    user = await db.users.find_one({"user_id": user_id})
+    access_token_payload = {
+        "sub": user_id,
+        "tenant_id": user.get("tenant_id", "demo-tenant"),
+        "type": "access",
+        "exp": now + datetime.timedelta(minutes=settings.jwt_expire_minutes)
+    }
+    access_token = jwt.encode(access_token_payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+    
+    response.set_cookie(
+        key="access_token",
+        value=access_token,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        max_age=settings.jwt_expire_minutes * 60,
+    )
+    
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user_id": user_id
+    }
+
+
+@router.post("/webauthn/authenticate/begin")
+async def authenticate_begin(payload: WebAuthnAuthenticateBeginRequest):
+    """Generate options for WebAuthn authentication."""
+    db = get_db()
+    settings = get_settings()
+    
+    try:
+        token_data = jwt.decode(payload.temp_token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
+        user_id = token_data.get("sub")
+        session_id = token_data.get("session_id")
+        token_type = token_data.get("type")
+        step = token_data.get("step")
+        if token_type != "temp_auth" or step != "webauthn" or not user_id or not session_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid temporary authentication token",
+            )
+    except JWTError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired temporary authentication token",
+        )
+        
+    session = await db.sessions.find_one({"session_id": session_id, "user_id": user_id})
+    if not session or not session.get("otp_verified"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="OTP verification must be completed first",
+        )
+        
+    cursor = db.webauthn_credentials.find({"user_id": user_id})
+    credentials = await cursor.to_list(length=100)
+    
+    allow_credentials = []
+    for cred in credentials:
+        allow_credentials.append(
+            PublicKeyCredentialDescriptor(
+                id=base64url_to_bytes(cred["credential_id"])
+            )
+        )
+        
+    options = generate_authentication_options(
+        rp_id=settings.webauthn_rp_id,
+        allow_credentials=allow_credentials,
+        user_verification=UserVerificationRequirement.PREFERRED
+    )
+    
+    challenge_str = bytes_to_base64url(options.challenge)
+    await db.sessions.update_one(
+        {"session_id": session_id},
+        {"$set": {"webauthn_challenge": challenge_str}}
+    )
+    
+    await log_auth_event(db, user_id, "webauthn.auth_begin", {})
+    import json
+    return json.loads(options_to_json(options))
+
+
+@router.post("/webauthn/authenticate/finish")
+async def authenticate_finish(payload: WebAuthnAuthenticateFinishRequest, response: Response):
+    """Verify WebAuthn authentication response. Validates sign counter and issues access token."""
+    db = get_db()
+    settings = get_settings()
+    now = datetime.datetime.now(datetime.timezone.utc)
+    
+    try:
+        token_data = jwt.decode(payload.temp_token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
+        user_id = token_data.get("sub")
+        session_id = token_data.get("session_id")
+        token_type = token_data.get("type")
+        step = token_data.get("step")
+        if token_type != "temp_auth" or step != "webauthn" or not user_id or not session_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid temporary authentication token",
+            )
+    except JWTError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired temporary authentication token",
+        )
+        
+    session = await db.sessions.find_one({"session_id": session_id, "user_id": user_id})
+    if not session or not session.get("webauthn_challenge"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Authentication has not been initiated",
+        )
+        
+    expected_challenge = base64url_to_bytes(session["webauthn_challenge"])
+    
+    try:
+        credential = parse_authentication_credential_json(payload.authentication_response)
+        
+        cred_id_str = bytes_to_base64url(credential.raw_id)
+        db_credential = await db.webauthn_credentials.find_one({"credential_id": cred_id_str, "user_id": user_id})
+        if not db_credential:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="WebAuthn credential not found for this user",
+            )
+            
+        public_key = base64url_to_bytes(db_credential["public_key"])
+        current_sign_counter = db_credential["sign_counter"]
+        
+        verification = verify_authentication_response(
+            credential=credential,
+            expected_challenge=expected_challenge,
+            expected_rp_id=settings.webauthn_rp_id,
+            expected_origin=settings.webauthn_origin,
+            credential_public_key=public_key,
+            credential_current_sign_counter=current_sign_counter,
+            require_user_verification=False,
+        )
+    except Exception as e:
+        await log_auth_event(db, user_id, "webauthn.auth_finish_failure", {"error": str(e)})
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"WebAuthn authentication failed: {e}",
+        )
+        
+    # Replay Protection: verification.new_sign_counter must exceed database count (or be 0 if not supported/provided)
+    if verification.new_sign_counter > 0 and verification.new_sign_counter <= current_sign_counter:
+        await log_auth_event(db, user_id, "webauthn.auth_replay_detected", {"credential_id": cred_id_str})
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Replay protection trigger: sign counter decreased or stayed identical.",
+        )
+        
+    await db.webauthn_credentials.update_one(
+        {"credential_id": cred_id_str},
+        {"$set": {"sign_counter": verification.new_sign_counter}}
+    )
+    
+    await db.sessions.delete_one({"session_id": session_id})
+    await log_auth_event(db, user_id, "webauthn.auth_finish_success", {"credential_id": cred_id_str})
+    
+    user = await db.users.find_one({"user_id": user_id})
+    access_token_payload = {
+        "sub": user_id,
+        "tenant_id": user.get("tenant_id", "demo-tenant"),
+        "type": "access",
+        "exp": now + datetime.timedelta(minutes=settings.jwt_expire_minutes)
+    }
+    access_token = jwt.encode(access_token_payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+    
+    response.set_cookie(
+        key="access_token",
+        value=access_token,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        max_age=settings.jwt_expire_minutes * 60,
+    )
+    
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user_id": user_id
+    }
+
+
+@router.post("/webauthn/bypass")
+async def webauthn_bypass(payload: WebAuthnRegisterBeginRequest, response: Response):
+    """Developer/demo bypass for WebAuthn in case platform authenticators are missing."""
+    db = get_db()
+    settings = get_settings()
+    now = datetime.datetime.now(datetime.timezone.utc)
+    
+    try:
+        token_data = jwt.decode(payload.temp_token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
+        user_id = token_data.get("sub")
+        session_id = token_data.get("session_id")
+        token_type = token_data.get("type")
+        step = token_data.get("step")
+        if token_type != "temp_auth" or step != "webauthn" or not user_id or not session_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid temporary authentication token",
+            )
+    except JWTError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired temporary authentication token",
+        )
+        
+    session = await db.sessions.find_one({"session_id": session_id, "user_id": user_id})
+    if not session or not session.get("otp_verified"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="OTP verification must be completed first",
+        )
+        
+    await db.sessions.delete_one({"session_id": session_id})
+    await log_auth_event(db, user_id, "webauthn.bypass_used", {})
+    
+    user = await db.users.find_one({"user_id": user_id})
+    access_token_payload = {
+        "sub": user_id,
+        "tenant_id": user.get("tenant_id", "demo-tenant"),
+        "type": "access",
+        "exp": now + datetime.timedelta(minutes=settings.jwt_expire_minutes)
+    }
+    access_token = jwt.encode(access_token_payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+    
+    response.set_cookie(
+        key="access_token",
+        value=access_token,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        max_age=settings.jwt_expire_minutes * 60,
+    )
+    
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user_id": user_id,
+        "bypass": True
+    }
+
+
+@router.post("/logout")
+async def logout(response: Response, request: Request):
+    """Log out user, clearing access token cookie."""
+    db = get_db()
+    settings = get_settings()
+    
+    # Try retrieving user_id for audit logging
+    user_id = "unknown"
+    token = request.cookies.get("access_token")
+    if token:
+        try:
+            payload = jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
+            user_id = payload.get("sub", "unknown")
+        except Exception:
+            pass
+            
+    response.delete_cookie("access_token")
+    await log_auth_event(db, user_id, "logout", {})
+    return {"message": "Successfully logged out"}
+
+
+@router.get("/me")
+async def get_me(current_user: dict = Depends(get_current_user)):
+    """Retrieve details of the currently authenticated user."""
+    return {
+        "user_id": current_user["user_id"],
+        "email": current_user["email"],
+        "tenant_id": current_user.get("tenant_id", "demo-tenant")
+    }
+

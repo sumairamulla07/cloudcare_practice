@@ -1,22 +1,243 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { demoLogin } from "@/lib/auth";
+import { startRegistration, startAuthentication } from "@simplewebauthn/browser";
+import { saveSession } from "@/lib/auth";
+
+const BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
+
+type Step = "password" | "otp" | "webauthn";
+type WebAuthnMode = "checking" | "register" | "authenticate" | "unsupported" | "error";
 
 export default function LoginPage() {
   const router = useRouter();
+  
+  // Input fields
   const [userId, setUserId] = useState("");
   const [password, setPassword] = useState("");
+  const [otp, setOtp] = useState("");
+  
+  // Wizard steps
+  const [step, setStep] = useState<Step>("password");
+  const [tempToken, setTempToken] = useState("");
+  const [nextWebauthnStatus, setNextWebauthnStatus] = useState<"webauthn_required" | "webauthn_registration_required">("webauthn_registration_required");
+  
+  // States
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [timer, setTimer] = useState(300); // 5 minutes
+  const [resendCooldown, setResendCooldown] = useState(60); // 60 seconds
+  const [webauthnMode, setWebauthnMode] = useState<WebAuthnMode>("checking");
 
-  const handleSubmit = (e: React.FormEvent) => {
+  // Timers for OTP
+  useEffect(() => {
+    if (step === "otp" && timer > 0) {
+      const t = setTimeout(() => setTimer(timer - 1), 1000);
+      return () => clearTimeout(t);
+    }
+  }, [step, timer]);
+
+  useEffect(() => {
+    if (step === "otp" && resendCooldown > 0) {
+      const t = setTimeout(() => setResendCooldown(resendCooldown - 1), 1000);
+      return () => clearTimeout(t);
+    }
+  }, [step, resendCooldown]);
+
+  const formatTime = (secs: number) => {
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    return `${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
+  };
+
+  // Step 1: Submit Password
+  const handlePasswordSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    // PLACEHOLDER: swap this for a real POST /api/auth/login call once the
-    // FastAPI backend + MongoDB users collection are wired up. For now this
-    // demo accepts any input (even empty) as a successful login.
-    demoLogin(userId);
-    router.push("/dashboard");
+    if (!userId || !password) {
+      setError("Please fill in all fields.");
+      return;
+    }
+    setError("");
+    setLoading(true);
+    try {
+      const res = await fetch(`${BASE_URL}/v1/auth/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ user_id: userId, password }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail || "Invalid User ID or Password");
+      }
+      setTempToken(data.temp_token);
+      setStep("otp");
+      setTimer(300);
+      setResendCooldown(60);
+    } catch (err: any) {
+      setError(err.message || "Connection error to authentication server.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Step 2: Verify OTP
+  const handleOtpSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!otp) {
+      setError("Please enter the verification code.");
+      return;
+    }
+    setError("");
+    setLoading(true);
+    try {
+      const res = await fetch(`${BASE_URL}/v1/auth/otp/verify`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ temp_token: tempToken, otp }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail || "Incorrect verification code.");
+      }
+      setTempToken(data.temp_token);
+      setNextWebauthnStatus(data.status);
+      setStep("webauthn");
+      
+      // Auto-trigger WebAuthn
+      triggerWebAuthn(data.temp_token, data.status);
+    } catch (err: any) {
+      setError(err.message || "OTP verification failed.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Resend OTP
+  const handleResendOtp = async () => {
+    if (resendCooldown > 0) return;
+    setError("");
+    setLoading(true);
+    try {
+      const res = await fetch(`${BASE_URL}/v1/auth/otp/resend`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ temp_token: tempToken }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail || "Failed to resend code.");
+      }
+      setTimer(300);
+      setResendCooldown(60);
+      setOtp("");
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Step 3: WebAuthn Trigger
+  const triggerWebAuthn = async (token: string, statusType: "webauthn_required" | "webauthn_registration_required") => {
+    setError("");
+    setLoading(true);
+    
+    const isWebAuthnSupported = typeof window !== "undefined" && 
+      !!window.PublicKeyCredential;
+      
+    if (!isWebAuthnSupported) {
+      setWebauthnMode("unsupported");
+      setLoading(false);
+      return;
+    }
+    
+    try {
+      if (statusType === "webauthn_registration_required") {
+        setWebauthnMode("register");
+        // 1. Begin registration
+        const optionsRes = await fetch(`${BASE_URL}/v1/auth/webauthn/register/begin`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ temp_token: token }),
+        });
+        const options = await optionsRes.json();
+        if (!optionsRes.ok) throw new Error(options.detail || "Failed to fetch registration options");
+        
+        // 2. Browser ceremony
+        const credential = await startRegistration(options);
+        
+        // 3. Finish registration
+        const finishRes = await fetch(`${BASE_URL}/v1/auth/webauthn/register/finish`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ temp_token: token, registration_response: credential }),
+        });
+        const result = await finishRes.json();
+        if (!finishRes.ok) throw new Error(result.detail || "WebAuthn enrollment rejected");
+        
+        // Success
+        saveSession(result.user_id);
+        router.push("/dashboard");
+      } else {
+        setWebauthnMode("authenticate");
+        // 1. Begin authentication
+        const optionsRes = await fetch(`${BASE_URL}/v1/auth/webauthn/authenticate/begin`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ temp_token: token }),
+        });
+        const options = await optionsRes.json();
+        if (!optionsRes.ok) throw new Error(options.detail || "Failed to fetch verification parameters");
+        
+        // 2. Browser ceremony
+        const credential = await startAuthentication(options);
+        
+        // 3. Finish authentication
+        const finishRes = await fetch(`${BASE_URL}/v1/auth/webauthn/authenticate/finish`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ temp_token: token, authentication_response: credential }),
+        });
+        const result = await finishRes.json();
+        if (!finishRes.ok) throw new Error(result.detail || "WebAuthn verification rejected");
+        
+        // Success
+        saveSession(result.user_id);
+        router.push("/dashboard");
+      }
+    } catch (err: any) {
+      console.warn("WebAuthn Error:", err);
+      // Don't treat cancelation or lack of device setup as a dead-end, show options
+      setError(err.message || "Biometric validation canceled or key not recognized.");
+      setWebauthnMode("error");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Bypass WebAuthn (Demo-only fallback)
+  const handleBypassWebAuthn = async () => {
+    setError("");
+    setLoading(true);
+    try {
+      const res = await fetch(`${BASE_URL}/v1/auth/webauthn/bypass`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ temp_token: tempToken }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail || "Bypass failed.");
+      }
+      saveSession(data.user_id);
+      router.push("/dashboard");
+    } catch (err: any) {
+      setError(err.message || "Failed to execute WebAuthn fallback bypass.");
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -27,42 +248,174 @@ export default function LoginPage() {
           CloudCare
         </Link>
 
-        <div className="bg-surface border border-line rounded-lg2 shadow-soft p-8">
-          <h1 className="font-display text-xl font-semibold text-ink mb-1">Welcome back</h1>
-          <p className="text-sm text-inkSoft mb-6">Log in to view your cloud cost dashboard.</p>
+        <div className="bg-surface border border-line rounded-lg2 shadow-soft p-8 transition-all duration-300">
+          
+          {/* STEP 1: PASSWORD */}
+          {step === "password" && (
+            <>
+              <h1 className="font-display text-xl font-semibold text-ink mb-1">Welcome back</h1>
+              <p className="text-sm text-inkSoft mb-6">Log in to view your cloud cost dashboard.</p>
+              
+              {error && <div className="mb-4 p-3 bg-red-50 border border-red-200 text-red-600 rounded-lg text-xs font-medium">{error}</div>}
 
-          <form onSubmit={handleSubmit} className="flex flex-col gap-4">
-            <div>
-              <label className="block text-[12.5px] font-semibold text-inkSoft mb-1.5">User ID</label>
-              <input
-                type="text"
-                value={userId}
-                onChange={(e) => setUserId(e.target.value)}
-                placeholder="demo.user"
-                className="w-full border-[1.5px] border-line rounded-lg px-3.5 py-3 text-[14.5px] bg-bg focus:outline-none focus:border-brandBlue focus:shadow-[0_0_0_4px_rgba(47,102,144,0.12)] transition-all"
-              />
-            </div>
-            <div>
-              <label className="block text-[12.5px] font-semibold text-inkSoft mb-1.5">Password</label>
-              <input
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="••••••••"
-                className="w-full border-[1.5px] border-line rounded-lg px-3.5 py-3 text-[14.5px] bg-bg focus:outline-none focus:border-brandBlue focus:shadow-[0_0_0_4px_rgba(47,102,144,0.12)] transition-all"
-              />
-            </div>
-            <button
-              type="submit"
-              className="mt-2 inline-flex items-center justify-center rounded-full bg-ink px-6 py-3 text-sm font-semibold text-white hover:-translate-y-0.5 hover:shadow-[0_10px_20px_-8px_rgba(16,34,46,0.4)] transition-all"
-            >
-              Log in
-            </button>
-          </form>
+              <form onSubmit={handlePasswordSubmit} className="flex flex-col gap-4">
+                <div>
+                  <label className="block text-[12.5px] font-semibold text-inkSoft mb-1.5">User ID</label>
+                  <input
+                    type="text"
+                    value={userId}
+                    onChange={(e) => setUserId(e.target.value)}
+                    placeholder="demo.user"
+                    disabled={loading}
+                    className="w-full border-[1.5px] border-line rounded-lg px-3.5 py-3 text-[14.5px] bg-bg focus:outline-none focus:border-brandBlue focus:shadow-[0_0_0_4px_rgba(47,102,144,0.12)] transition-all disabled:opacity-50"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[12.5px] font-semibold text-inkSoft mb-1.5">Password</label>
+                  <input
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="••••••••"
+                    disabled={loading}
+                    className="w-full border-[1.5px] border-line rounded-lg px-3.5 py-3 text-[14.5px] bg-bg focus:outline-none focus:border-brandBlue focus:shadow-[0_0_0_4px_rgba(47,102,144,0.12)] transition-all disabled:opacity-50"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="mt-2 inline-flex items-center justify-center rounded-full bg-ink px-6 py-3 text-sm font-semibold text-white hover:-translate-y-0.5 hover:shadow-[0_10px_20px_-8px_rgba(16,34,46,0.4)] transition-all disabled:opacity-50"
+                >
+                  {loading ? "Verifying..." : "Verify Password"}
+                </button>
+              </form>
+              <p className="text-center text-[12.5px] text-inkFaint mt-5">
+                Demo Credentials: <strong>demo.user</strong> / <strong>password123</strong>
+              </p>
+            </>
+          )}
 
-          <p className="text-center text-[12.5px] text-inkFaint mt-5">
-            Demo mode — enter any User ID and Password to continue.
-          </p>
+          {/* STEP 2: EMAIL OTP */}
+          {step === "otp" && (
+            <>
+              <h1 className="font-display text-xl font-semibold text-ink mb-1">Enter Verification Code</h1>
+              <p className="text-sm text-inkSoft mb-6">We've sent a 6-digit OTP code to your registered email (and console output).</p>
+
+              {error && <div className="mb-4 p-3 bg-red-50 border border-red-200 text-red-600 rounded-lg text-xs font-medium">{error}</div>}
+
+              <form onSubmit={handleOtpSubmit} className="flex flex-col gap-4">
+                <div>
+                  <div className="flex justify-between items-center mb-1.5">
+                    <label className="block text-[12.5px] font-semibold text-inkSoft">Verification Code</label>
+                    <span className={`text-[12px] font-mono ${timer < 60 ? "text-red-500 font-bold animate-pulse" : "text-brandBlue"}`}>
+                      Expires in: {formatTime(timer)}
+                    </span>
+                  </div>
+                  <input
+                    type="text"
+                    maxLength={6}
+                    value={otp}
+                    onChange={(e) => setOtp(e.target.value.replace(/\D/g, ""))}
+                    placeholder="000000"
+                    disabled={loading || timer === 0}
+                    className="w-full text-center tracking-[8px] font-mono border-[1.5px] border-line rounded-lg px-3.5 py-3 text-lg bg-bg focus:outline-none focus:border-brandBlue focus:shadow-[0_0_0_4px_rgba(47,102,144,0.12)] transition-all disabled:opacity-50"
+                  />
+                </div>
+                
+                <button
+                  type="submit"
+                  disabled={loading || timer === 0}
+                  className="mt-2 inline-flex items-center justify-center rounded-full bg-ink px-6 py-3 text-sm font-semibold text-white hover:-translate-y-0.5 hover:shadow-[0_10px_20px_-8px_rgba(16,34,46,0.4)] transition-all disabled:opacity-50"
+                >
+                  {loading ? "Validating..." : "Verify Code"}
+                </button>
+              </form>
+
+              <div className="mt-5 flex items-center justify-between border-t border-line pt-4">
+                <button
+                  type="button"
+                  onClick={() => setStep("password")}
+                  disabled={loading}
+                  className="text-[12.5px] font-medium text-inkSoft hover:text-ink transition-colors disabled:opacity-50"
+                >
+                  ← Back to password
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleResendOtp}
+                  disabled={loading || resendCooldown > 0}
+                  className="text-[12.5px] font-semibold text-brandBlue hover:text-brandBlue/80 transition-colors disabled:opacity-50 disabled:text-inkFaint"
+                >
+                  {resendCooldown > 0 ? `Resend in ${resendCooldown}s` : "Resend code"}
+                </button>
+              </div>
+            </>
+          )}
+
+          {/* STEP 3: WEBAUTHN */}
+          {step === "webauthn" && (
+            <>
+              <h1 className="font-display text-xl font-semibold text-ink mb-1">Device Biometrics</h1>
+              <p className="text-sm text-inkSoft mb-6">Complete authentication using your device security (Face ID, Touch ID, Windows Hello, or PIN).</p>
+
+              {error && <div className="mb-4 p-3 bg-red-50 border border-red-200 text-red-600 rounded-lg text-xs font-medium">{error}</div>}
+
+              <div className="flex flex-col gap-4">
+                <div className="p-4 bg-bg border border-line rounded-lg flex flex-col items-center justify-center text-center">
+                  <span className="w-12 h-12 rounded-full bg-brandBlue/10 flex items-center justify-center mb-3">
+                    <svg className="w-6 h-6 text-brandBlue" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 11c0 3.517-1.009 6.799-2.753 9.571m-3.44-2.04l.054-.09A13.916 13.916 0 009 11.571V11a7.002 7.002 0 00-7-7 2 2 0 00-2 2v.09C0 9.201 1.009 12.483 2.753 15.255m11.547-11.34A14.28 14.28 0 0113.123 12m-2.91-2.91A8.995 8.995 0 008 11.571V12a4 4 0 004 4h.09A13.978 13.978 0 0013 12V11c0-2.28-.94-4.34-2.457-5.83Z" />
+                    </svg>
+                  </span>
+                  <p className="text-xs font-semibold text-ink">
+                    {webauthnMode === "register" ? "Enroll Device Passkey" : 
+                     webauthnMode === "authenticate" ? "Verifying Fingerprint/Face/PIN" : 
+                     webauthnMode === "unsupported" ? "Passkey Not Supported" : "Biometrics Action Needed"}
+                  </p>
+                  <p className="text-[11px] text-inkSoft mt-1">
+                    {webauthnMode === "register" ? "You will be prompted to create a credential on this browser." :
+                     webauthnMode === "authenticate" ? "Please follow your browser's prompt to verify." :
+                     webauthnMode === "unsupported" ? "This browser doesn't support platform WebAuthn." :
+                     "Please trigger the ceremony again or use the fallback."}
+                  </p>
+                </div>
+
+                {webauthnMode !== "unsupported" && (
+                  <button
+                    type="button"
+                    onClick={() => triggerWebAuthn(tempToken, nextWebauthnStatus)}
+                    disabled={loading}
+                    className="inline-flex items-center justify-center rounded-full bg-ink px-6 py-3 text-sm font-semibold text-white hover:-translate-y-0.5 hover:shadow-[0_10px_20px_-8px_rgba(16,34,46,0.4)] transition-all disabled:opacity-50"
+                  >
+                    {loading ? "Waiting for device..." : "Retry Biometrics"}
+                  </button>
+                )}
+
+                {/* Graceful fallbacks so we never hit a dead end */}
+                <div className="border-t border-line pt-4 flex flex-col gap-2.5">
+                  <button
+                    type="button"
+                    onClick={handleBypassWebAuthn}
+                    disabled={loading}
+                    className="w-full inline-flex items-center justify-center rounded-full border-[1.5px] border-line px-5 py-2.5 text-xs font-semibold text-inkSoft hover:bg-bg transition-all"
+                  >
+                    Bypass Biometrics (Demo Fallback)
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setStep("password")}
+                    disabled={loading}
+                    className="w-full text-center text-xs text-inkFaint hover:text-inkSoft transition-colors"
+                  >
+                    Start over
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
+
         </div>
 
         <p className="text-center text-[13px] text-inkFaint mt-6">

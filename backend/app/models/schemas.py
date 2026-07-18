@@ -121,3 +121,46 @@ class LoginResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     user_id: str
+
+
+# ---------------------------------------------------------------------------
+# 3FA Schemas (added for Security & QA module)
+# ---------------------------------------------------------------------------
+
+class LoginStep1Response(BaseModel):
+    status: Literal["otp_required"]
+    user_id: str
+    temp_token: str
+
+
+class OtpVerifyRequest(BaseModel):
+    temp_token: str
+    otp: str
+
+
+class OtpVerifyResponse(BaseModel):
+    status: Literal["webauthn_required", "webauthn_registration_required"]
+    user_id: str
+    temp_token: str
+
+
+class OtpResendRequest(BaseModel):
+    temp_token: str
+
+
+class WebAuthnRegisterBeginRequest(BaseModel):
+    temp_token: str
+
+
+class WebAuthnRegisterFinishRequest(BaseModel):
+    temp_token: str
+    registration_response: dict
+
+
+class WebAuthnAuthenticateBeginRequest(BaseModel):
+    temp_token: str
+
+
+class WebAuthnAuthenticateFinishRequest(BaseModel):
+    temp_token: str
+    authentication_response: dict

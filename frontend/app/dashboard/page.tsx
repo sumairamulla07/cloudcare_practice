@@ -26,8 +26,27 @@ export default function DashboardPage() {
       router.replace("/login");
       return;
     }
-    setSession(s);
-    setChecked(true);
+    const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
+    fetch(`${apiBaseUrl}/v1/auth/me`, { credentials: "include" })
+      .then((res) => {
+        if (!res.ok) throw new Error("Backend session invalid");
+        return res.json();
+      })
+      .then((data) => {
+        setSession({
+          userId: data.user_id,
+          loggedInAt: s.loggedInAt,
+        });
+        setChecked(true);
+      })
+      .catch((err) => {
+        console.warn("Session validation failed:", err);
+        // Clear session and redirect to login
+        import("@/lib/auth").then(({ demoLogout }) => {
+          demoLogout();
+          router.replace("/login");
+        });
+      });
   }, [router]);
 
   if (!checked || !session) {

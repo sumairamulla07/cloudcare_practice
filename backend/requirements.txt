@@ -12,6 +12,8 @@ pymongo==4.6.3
 # Auth placeholder (swap for real JWT flow later)
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
+webauthn==2.2.0
+pyotp==2.9.0
 
 # Agentic orchestration (per blueprint section 9.1) — optional for the
 # hackathon demo, needed once you wire real LangGraph agents.

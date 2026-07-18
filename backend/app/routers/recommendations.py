@@ -1,9 +1,10 @@
 from decimal import Decimal
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 
 from app.models.schemas import ActionProposal
+from app.routers.auth import get_current_user
 
 router = APIRouter(prefix="/v1/recommendations", tags=["recommendations"])
 
@@ -42,7 +43,11 @@ _PROPOSALS: dict[UUID, ActionProposal] = {
 
 
 @router.get("", response_model=list[ActionProposal])
-async def list_recommendations(status: str | None = None, risk_level: str | None = None) -> list[ActionProposal]:
+async def list_recommendations(
+    status: str | None = None,
+    risk_level: str | None = None,
+    current_user: dict = Depends(get_current_user)
+) -> list[ActionProposal]:
     results = list(_PROPOSALS.values())
     if status:
         results = [p for p in results if p.status == status]
@@ -52,7 +57,10 @@ async def list_recommendations(status: str | None = None, risk_level: str | None
 
 
 @router.post("/{proposal_id}/approve", response_model=ActionProposal)
-async def approve_recommendation(proposal_id: UUID) -> ActionProposal:
+async def approve_recommendation(
+    proposal_id: UUID,
+    current_user: dict = Depends(get_current_user)
+) -> ActionProposal:
     """
     TODO: this should call the Supervisor policy engine (blueprint 6.1) to
     re-validate the proposal against current policy before flipping status,
@@ -66,7 +74,10 @@ async def approve_recommendation(proposal_id: UUID) -> ActionProposal:
 
 
 @router.post("/{proposal_id}/execute", response_model=ActionProposal)
-async def execute_recommendation(proposal_id: UUID) -> ActionProposal:
+async def execute_recommendation(
+    proposal_id: UUID,
+    current_user: dict = Depends(get_current_user)
+) -> ActionProposal:
     """
     TODO: this should call the Executor service (blueprint 10.2) with the
     approved template + parameters, using an idempotency key, then trigger
@@ -75,6 +86,11 @@ async def execute_recommendation(proposal_id: UUID) -> ActionProposal:
     proposal = _PROPOSALS.get(proposal_id)
     if not proposal:
         raise HTTPException(status_code=404, detail="Proposal not found")
+        
+    # Idempotency check: if already executed or verified, return immediately
+    if proposal.status in ("executed", "verified"):
+        return proposal
+        
     if proposal.status != "approved" and proposal.requires_human_approval:
         raise HTTPException(status_code=400, detail="Proposal requires approval before execution")
     proposal.status = "executed"

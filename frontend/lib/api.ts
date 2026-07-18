@@ -19,7 +19,7 @@ const BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000"
 
 async function safeFetch<T>(path: string, fallback: T): Promise<T> {
   try {
-    const res = await fetch(`${BASE_URL}${path}`, { cache: "no-store" });
+    const res = await fetch(`${BASE_URL}${path}`, { cache: "no-store", credentials: "include" });
     if (!res.ok) throw new Error(`Request failed: ${res.status}`);
     return (await res.json()) as T;
   } catch (err) {
