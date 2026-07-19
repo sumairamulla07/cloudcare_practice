@@ -16,6 +16,12 @@ from app.routers.auth import pwd_context
 mock_db = MagicMock()
 app.dependency_overrides[get_db] = lambda: mock_db
 
+# Patch get_db at the module level where they are imported and called directly
+patcher_auth = patch("app.routers.auth.get_db", return_value=mock_db)
+patcher_dep = patch("app.dependencies.get_db", return_value=mock_db)
+patcher_auth.start()
+patcher_dep.start()
+
 client = TestClient(app)
 settings = get_settings()
 

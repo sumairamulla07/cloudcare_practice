@@ -15,14 +15,27 @@ from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 
 from app.config import get_settings
 
+import asyncio
+
 _client: AsyncIOMotorClient | None = None
 
 
 def get_client() -> AsyncIOMotorClient:
     global _client
+    try:
+        current_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        current_loop = None
+
+    if _client is not None:
+        # Check if the client is bound to a closed or different loop (common in pytest)
+        client_loop = getattr(_client, "get_io_loop", lambda: None)()
+        if client_loop is None or client_loop.is_closed() or (current_loop and client_loop != current_loop):
+            _client = None
+
     if _client is None:
         settings = get_settings()
-        _client = AsyncIOMotorClient(settings.mongodb_uri)
+        _client = AsyncIOMotorClient(settings.mongodb_uri, tz_aware=True)
     return _client
 
 

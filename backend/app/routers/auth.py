@@ -9,10 +9,10 @@ import secrets
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from typing import Literal
+from typing import Literal, Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, status, Response, Request
-from fastapi.security import OAuth2PasswordBearer
+from fastapi.security import OAuth2PasswordBearer, HTTPAuthorizationCredentials
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 
@@ -45,6 +45,7 @@ from app.models.schemas import (
     WebAuthnAuthenticateBeginRequest,
     WebAuthnAuthenticateFinishRequest,
     RegisterRequest,
+    UserPublic,
 )
 
 router = APIRouter(prefix="/v1/auth", tags=["auth"])
@@ -296,7 +297,7 @@ async def verify_otp(payload: OtpVerifyRequest) -> OtpVerifyResponse:
             locked_until = datetime.datetime.fromisoformat(locked_until)
         if locked_until > now:
             raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUEST,
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail="Account temporarily locked. Try again later.",
             )
             
@@ -399,7 +400,7 @@ async def resend_otp(payload: OtpResendRequest, background_tasks: BackgroundTask
             last_otp_sent = datetime.datetime.fromisoformat(last_otp_sent)
         if (now - last_otp_sent).total_seconds() < 60:
             raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUEST,
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail="Please wait 60 seconds before requesting another verification code.",
             )
             
@@ -563,7 +564,7 @@ async def register_finish(payload: WebAuthnRegisterFinishRequest, response: Resp
         key="access_token",
         value=access_token,
         httponly=True,
-        secure=True,
+        secure=settings.app_env != "development",
         samesite="lax",
         max_age=settings.jwt_expire_minutes * 60,
     )
@@ -725,7 +726,7 @@ async def authenticate_finish(payload: WebAuthnAuthenticateFinishRequest, respon
         key="access_token",
         value=access_token,
         httponly=True,
-        secure=True,
+        secure=settings.app_env != "development",
         samesite="lax",
         max_age=settings.jwt_expire_minutes * 60,
     )
@@ -784,7 +785,7 @@ async def webauthn_bypass(payload: WebAuthnRegisterBeginRequest, response: Respo
         key="access_token",
         value=access_token,
         httponly=True,
-        secure=True,
+        secure=settings.app_env != "development",
         samesite="lax",
         max_age=settings.jwt_expire_minutes * 60,
     )
@@ -901,7 +902,7 @@ async def refresh(response: Response, request: Request, credentials: Annotated[H
         key="access_token",
         value=new_token,
         httponly=True,
-        secure=True,
+        secure=settings.app_env != "development",
         samesite="lax",
         max_age=settings.jwt_expire_minutes * 60,
     )
