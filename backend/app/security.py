@@ -32,13 +32,25 @@ def create_access_token(user_id: str, tenant_id: str) -> str:
 
 
 def decode_access_token(token: str) -> dict | None:
-    """Returns the decoded payload, or None if the token is invalid/expired.
-
-    A `get_current_user` FastAPI dependency (Days 5-7 task — tenant-scoped
-    auth middleware) will build on this to protect the other routers.
-    """
+    """Returns the decoded payload, or None if the token is invalid/expired."""
     settings = get_settings()
     try:
         return jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
+    except JWTError:
+        return None
+
+
+def decode_access_token_allow_expired(token: str) -> dict | None:
+    """Same as decode_access_token, but ignores expiry — used only by the
+    /v1/auth/refresh endpoint so a *recently* expired token can still be
+    exchanged for a new one, without accepting a forged/tampered token."""
+    settings = get_settings()
+    try:
+        return jwt.decode(
+            token,
+            settings.jwt_secret,
+            algorithms=["HS256"],
+            options={"verify_exp": False},
+        )
     except JWTError:
         return None

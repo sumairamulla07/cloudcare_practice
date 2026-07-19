@@ -47,6 +47,7 @@ ResourceStatus = Literal["Healthy", "Idle", "Over-provisioned", "At-risk"]
 
 class Resource(BaseModel):
     id: str
+    tenant_id: str = "demo-tenant"
     type: str
     region: str = "ap-south-1"
     cpu_p95: float
@@ -63,6 +64,7 @@ class Resource(BaseModel):
 
 class ActionProposal(BaseModel):
     proposal_id: UUID = Field(default_factory=uuid4)
+    tenant_id: str = "demo-tenant"
     resource_arn: str
     action_type: Literal["stop_instance", "schedule_instance", "resize_instance"]
     template_id: str

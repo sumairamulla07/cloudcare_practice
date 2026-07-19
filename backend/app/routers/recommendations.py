@@ -4,6 +4,7 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, HTTPException
 
 from app.db import get_db
+from app.dependencies import CurrentUser
 from app.models.schemas import ActionProposal
 
 router = APIRouter(prefix="/v1/recommendations", tags=["recommendations"])
@@ -62,10 +63,14 @@ async def _proposals_collection():
 
 
 @router.get("", response_model=list[ActionProposal])
-async def list_recommendations(status: str | None = None, risk_level: str | None = None) -> list[ActionProposal]:
+async def list_recommendations(
+    current_user: CurrentUser,
+    status: str | None = None,
+    risk_level: str | None = None,
+) -> list[ActionProposal]:
     collection = await _proposals_collection()
 
-    query: dict = {}
+    query: dict = {"tenant_id": current_user["tenant_id"]}
     if status:
         query["status"] = status
     if risk_level:
@@ -76,7 +81,7 @@ async def list_recommendations(status: str | None = None, risk_level: str | None
 
 
 @router.post("/{proposal_id}/approve", response_model=ActionProposal)
-async def approve_recommendation(proposal_id: UUID) -> ActionProposal:
+async def approve_recommendation(proposal_id: UUID, current_user: CurrentUser) -> ActionProposal:
     """
     TODO (Days 8-10, Sumaira): call the Supervisor policy engine (blueprint
     6.1) to re-validate the proposal against current policy before flipping
@@ -84,7 +89,7 @@ async def approve_recommendation(proposal_id: UUID) -> ActionProposal:
     timestamp.
     """
     collection = await _proposals_collection()
-    doc = await collection.find_one({"proposal_id": str(proposal_id)})
+    doc = await collection.find_one({"proposal_id": str(proposal_id), "tenant_id": current_user["tenant_id"]})
     if not doc:
         raise HTTPException(status_code=404, detail="Proposal not found")
 
@@ -94,14 +99,14 @@ async def approve_recommendation(proposal_id: UUID) -> ActionProposal:
 
 
 @router.post("/{proposal_id}/execute", response_model=ActionProposal)
-async def execute_recommendation(proposal_id: UUID) -> ActionProposal:
+async def execute_recommendation(proposal_id: UUID, current_user: CurrentUser) -> ActionProposal:
     """
     TODO (Days 8-10, Sumaira): call the Executor service (blueprint 10.2)
     with the approved template + parameters, using an idempotency key, then
     trigger the Verifier (blueprint 10.3) before marking status as verified.
     """
     collection = await _proposals_collection()
-    doc = await collection.find_one({"proposal_id": str(proposal_id)})
+    doc = await collection.find_one({"proposal_id": str(proposal_id), "tenant_id": current_user["tenant_id"]})
     if not doc:
         raise HTTPException(status_code=404, detail="Proposal not found")
 

@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
 from app.db import get_db
+from app.dependencies import CurrentUser
 from app.mock_data import RESOURCES
 from app.models.schemas import Resource
 
@@ -19,17 +20,21 @@ async def _resources_collection():
 
 
 @router.get("", response_model=list[Resource])
-async def list_resources(environment: str | None = None, status: str | None = None) -> list[Resource]:
-    """List monitored resources, optionally filtered by environment or status.
+async def list_resources(
+    current_user: CurrentUser,
+    environment: str | None = None,
+    status: str | None = None,
+) -> list[Resource]:
+    """List monitored resources, scoped to the caller's tenant (Days 5-7),
+    optionally filtered by environment or status.
 
-    Now backed by MongoDB's `resources` collection instead of the in-memory
-    mock_data.py list. Once the collector service (blueprint 9.2/9.3) is
-    writing real AWS inventory + CloudWatch data in, this query needs no
-    further changes.
+    Backed by MongoDB's `resources` collection. Once the collector service
+    (blueprint 9.2/9.3) is writing real AWS inventory + CloudWatch data in,
+    this query needs no further changes.
     """
     collection = await _resources_collection()
 
-    query: dict = {}
+    query: dict = {"tenant_id": current_user["tenant_id"]}
     if environment:
         query["environment"] = environment
     if status:
