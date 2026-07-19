@@ -48,6 +48,9 @@ async def seed():
     print("Seeded 1 demo cloud account (status=pending until Soham validates it via STS)")
 
     # --- resources ---------------------------------------------------------
+    # tenant_id defaults to "demo-tenant" on the Resource model, matching
+    # the demo user's tenant — this is what makes /v1/resources (now
+    # tenant-scoped, Days 5-7) return this seed data for the demo user.
     await db.resources.delete_many({})
     await db.resources.insert_many([r.model_dump() for r in RESOURCES])
     print(f"Seeded {len(RESOURCES)} resources")
