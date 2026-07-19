@@ -14,6 +14,7 @@ python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 webauthn==2.2.0
 pyotp==2.9.0
+bcrypt==4.0.1
 
 # Agentic orchestration (per blueprint section 9.1) — optional for the
 # hackathon demo, needed once you wire real LangGraph agents.

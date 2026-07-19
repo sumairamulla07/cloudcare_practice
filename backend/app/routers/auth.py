@@ -135,44 +135,7 @@ def send_otp_email_sync(to_email: str, otp: str, settings):
 # Auth Dependency
 # ---------------------------------------------------------------------------
 
-async def get_current_user(request: Request, token: str = Depends(oauth2_scheme)):
-    """Tenant-scoped user dependency guarding protected endpoints."""
-    settings = get_settings()
-    db = get_db()
-    
-    actual_token = token
-    if not actual_token:
-        actual_token = request.cookies.get("access_token")
-        
-    if not actual_token:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication credentials were not provided",
-        )
-        
-    try:
-        payload = jwt.decode(actual_token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
-        user_id = payload.get("sub")
-        if not user_id or payload.get("type") != "access":
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid token claims",
-            )
-    except JWTError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired authentication token",
-        )
-        
-    await ensure_demo_user(db)
-    user = await db.users.find_one({"user_id": user_id})
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found",
-        )
-        
-    return user
+from app.dependencies import get_current_user, CurrentUser
 
 
 # ---------------------------------------------------------------------------
@@ -855,18 +818,8 @@ async def logout(response: Response, request: Request):
     return {"message": "Successfully logged out"}
 
 
-@router.get("/me")
-async def get_me(current_user: dict = Depends(get_current_user)):
-    """Retrieve details of the currently authenticated user."""
-    return {
-        "user_id": current_user["user_id"],
-        "email": current_user["email"],
-        "tenant_id": current_user.get("tenant_id", "demo-tenant")
-    }
-
-
-@router.post("/register")
-async def register(payload: RegisterRequest):
+@router.post("/register", response_model=UserPublic, status_code=201)
+async def register(payload: RegisterRequest) -> UserPublic:
     """Register a new user account with Password/Email (pre-enrollment for 3FA)."""
     db = get_db()
     
@@ -893,10 +846,76 @@ async def register(payload: RegisterRequest):
         "hashed_password": hashed,
         "email": payload.email,
         "tenant_id": payload.tenant_id,
+        "full_name": payload.full_name,
         "failed_login_attempts": 0,
     })
     
     await log_auth_event(db, payload.user_id, "register.success", {"email": payload.email})
-    return {"message": "Account created successfully. You can now log in."}
+    return UserPublic(
+        user_id=payload.user_id,
+        tenant_id=payload.tenant_id,
+        email=payload.email,
+        full_name=payload.full_name,
+    )
 
+
+@router.post("/refresh", response_model=LoginResponse)
+async def refresh(response: Response, request: Request, credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(oauth2_scheme)] = None) -> LoginResponse:
+    """
+    Exchange a token for a fresh one with a new expiry, without re-sending
+    the password. Accepts cookies or Bearer headers.
+    """
+    settings = get_settings()
+    token = request.cookies.get("access_token")
+    if not token and credentials:
+        token = credentials.credentials
+        
+    if not token:
+        raise HTTPException(status_code=401, detail="No session token found")
+        
+    try:
+        payload = jwt.decode(
+            token,
+            settings.jwt_secret,
+            algorithms=[settings.jwt_algorithm],
+            options={"verify_exp": False},
+        )
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token — please log in again")
+        
+    user_id = payload.get("sub")
+    tenant_id = payload.get("tenant_id")
+    if not user_id or not tenant_id:
+        raise HTTPException(status_code=401, detail="Invalid token claims")
+        
+    now = datetime.datetime.now(datetime.timezone.utc)
+    access_token_payload = {
+        "sub": user_id,
+        "tenant_id": tenant_id,
+        "type": "access",
+        "exp": now + datetime.timedelta(minutes=settings.jwt_expire_minutes)
+    }
+    new_token = jwt.encode(access_token_payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+    
+    response.set_cookie(
+        key="access_token",
+        value=new_token,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        max_age=settings.jwt_expire_minutes * 60,
+    )
+    
+    return LoginResponse(access_token=new_token, user_id=user_id, tenant_id=tenant_id)
+
+
+@router.get("/me", response_model=UserPublic)
+async def get_me(current_user: CurrentUser) -> UserPublic:
+    """Retrieve details of the currently authenticated user."""
+    return UserPublic(
+        user_id=current_user["user_id"],
+        tenant_id=current_user["tenant_id"],
+        email=current_user.get("email"),
+        full_name=current_user.get("full_name"),
+    )
 
