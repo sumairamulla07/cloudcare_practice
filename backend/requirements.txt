@@ -1,28 +1,6 @@
-# Core API
-fastapi==0.111.0
-uvicorn[standard]==0.30.1
-pydantic==2.7.4
-pydantic-settings==2.3.4
-python-dotenv==1.0.1
-
-# MongoDB (async driver)
-motor==3.4.0
-pymongo==4.6.3
-
-# Auth placeholder (swap for real JWT flow later)
-python-jose[cryptography]==3.3.0
-passlib[bcrypt]==1.7.4
-bcrypt==4.0.1
-
-# Agentic orchestration (per blueprint section 9.1) — optional for the
-# hackathon demo, needed once you wire real LangGraph agents.
-langgraph==0.1.5
-langchain-core==0.2.9
-
-# AWS SDK — needed once you connect a real AWS sandbox account
-boto3==1.34.131
-
-# Forecasting (per blueprint section 5.2) — optional, used by the
-# forecasting service once real cost history is available
-statsmodels==0.14.2
-numpy==1.26.4
+boto3
+fastapi
+pydantic
+pydantic-settings
+pytest
+uvicorn[standard]
