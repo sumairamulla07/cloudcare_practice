@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { getDemoSession, type DemoSession } from "@/lib/auth";
+import { getSession, type Session } from "@/lib/auth";
 import Sidebar from "@/components/dashboard/Sidebar";
 import DashboardHeader from "@/components/dashboard/DashboardHeader";
 import KpiCards from "@/components/dashboard/KpiCards";
@@ -17,11 +17,11 @@ import NextSteps from "@/components/dashboard/NextSteps";
 // Next.js middleware (middleware.ts) checking a session cookie instead.
 export default function DashboardPage() {
   const router = useRouter();
-  const [session, setSession] = useState<DemoSession | null>(null);
+  const [session, setSession] = useState<Session | null>(null);
   const [checked, setChecked] = useState(false);
 
   useEffect(() => {
-    const s = getDemoSession();
+    const s = getSession();
     if (!s) {
       router.replace("/login");
       return;

@@ -17,15 +17,45 @@ import {
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
 
-async function safeFetch<T>(path: string, fallback: T): Promise<T> {
+import { getSession } from "./auth";
+
+async function safeFetch<T>(path: string, fallback: T, authed = false): Promise<T> {
   try {
-    const res = await fetch(`${BASE_URL}${path}`, { cache: "no-store" });
+    const headers: Record<string, string> = {};
+    if (authed) {
+      const session = getSession();
+      if (!session) throw new Error("No session — user not logged in");
+      headers["Authorization"] = `Bearer ${session.accessToken}`;
+    }
+    const res = await fetch(`${BASE_URL}${path}`, { cache: "no-store", headers });
     if (!res.ok) throw new Error(`Request failed: ${res.status}`);
     return (await res.json()) as T;
   } catch (err) {
     console.warn(`[api] Falling back to mock data for ${path}:`, err);
     return fallback;
   }
+}
+
+// --- Auth (real, calls /v1/auth/login) ---------------------------------
+
+export interface LoginResponse {
+  access_token: string;
+  token_type: string;
+  user_id: string;
+  tenant_id: string;
+}
+
+export async function loginUser(userId: string, password: string): Promise<LoginResponse> {
+  const res = await fetch(`${BASE_URL}/v1/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ user_id: userId, password }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail || "Invalid user ID or password");
+  }
+  return (await res.json()) as LoginResponse;
 }
 
 // --- KPIs (from /v1/savings) ------------------------------------------------
@@ -61,7 +91,7 @@ interface ApiResource {
 }
 
 export async function fetchResources(): Promise<ResourceRow[]> {
-  const data = await safeFetch<ApiResource[] | null>("/v1/resources", null);
+  const data = await safeFetch<ApiResource[] | null>("/v1/resources", null, true);
   if (!data) return mockResources;
 
   return data.map((r) => ({

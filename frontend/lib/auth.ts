@@ -1,49 +1,41 @@
 // ---------------------------------------------------------------------------
-// DEMO AUTH — NOT REAL AUTHENTICATION
+// REAL AUTH — stores the JWT returned by /v1/auth/login
 // ---------------------------------------------------------------------------
-// This accepts any userId/password and stores a flag in localStorage so the
-// dashboard route can check "is someone logged in" client-side.
-//
-// PLACEHOLDER: replace this whole file with real auth once the backend is
-// ready. Suggested path:
-//   1. POST /api/auth/login (FastAPI) -> verifies against MongoDB users
-//      collection, returns a JWT.
-//   2. Store the JWT in an httpOnly cookie (set by the backend response),
-//      not localStorage — localStorage is not secure against XSS.
-//   3. Use Next.js middleware (middleware.ts) to protect /dashboard/* routes
-//      server-side instead of the client-side check used here.
+// NOTE: localStorage is used here for demo speed. The blueprint's real
+// recommendation is an httpOnly cookie set by the backend, checked via
+// Next.js middleware — flagged as a post-hackathon hardening task, not a
+// blocker for the demo.
 // ---------------------------------------------------------------------------
 
-const STORAGE_KEY = "cloudcare_demo_session";
+const STORAGE_KEY = "cloudcare_session";
 
-export interface DemoSession {
+export interface Session {
+  accessToken: string;
   userId: string;
+  tenantId: string;
   loggedInAt: string;
 }
 
-export function demoLogin(userId: string): DemoSession {
-  const session: DemoSession = {
-    userId: userId.trim() || "Demo User",
-    loggedInAt: new Date().toISOString(),
-  };
+export function saveSession(s: Omit<Session, "loggedInAt">): Session {
+  const session: Session = { ...s, loggedInAt: new Date().toISOString() };
   if (typeof window !== "undefined") {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(session));
   }
   return session;
 }
 
-export function demoLogout() {
+export function logout() {
   if (typeof window !== "undefined") {
     window.localStorage.removeItem(STORAGE_KEY);
   }
 }
 
-export function getDemoSession(): DemoSession | null {
+export function getSession(): Session | null {
   if (typeof window === "undefined") return null;
   const raw = window.localStorage.getItem(STORAGE_KEY);
   if (!raw) return null;
   try {
-    return JSON.parse(raw) as DemoSession;
+    return JSON.parse(raw) as Session;
   } catch {
     return null;
   }
