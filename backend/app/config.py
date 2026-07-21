@@ -24,12 +24,18 @@ class Settings(BaseSettings):
 
     # AWS — PLACEHOLDER, only needed once a real sandbox account is connected
     aws_region: str = "ap-south-1"
+    aws_profile: str | None = None
+    aws_role_arn: str = ""
     aws_read_role_arn: str = ""
     aws_external_id: str = ""
 
     # LLM — PLACEHOLDER, only needed once Decision/Supervisor call a real LLM
     openrouter_api_key: str = ""
     llm_model: str = "anthropic/claude-3.5-sonnet"
+
+    # Execution safety
+    execution_enabled: bool = False
+    execution_mode: str = "simulation"
 
     @property
     def cors_origin_list(self) -> list[str]:
